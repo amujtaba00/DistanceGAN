@@ -13,6 +13,7 @@ from torch import optim
 from model import G12, G21
 from model import D1, D2
 from PIL import Image
+import math
 
 
 class Solver(object):
@@ -64,7 +65,7 @@ class Solver(object):
             self.d1.cuda()
             self.d2.cuda()
     
-    def  merge_images(self, sources, targets, k=10):
+    def merge_images(self, sources, targets, k=10):
         _, _, h, w = sources.shape
         row = int(np.sqrt(self.batch_size))
         merged = np.zeros([3, row*h, row*w*2])
@@ -254,23 +255,127 @@ class Solver(object):
         self.d1.load_state_dict(torch.load(d1_path))
         self.d2.load_state_dict(torch.load(d2_path))
 
-        # load svhn and mnist dataset
-        svhn, s_labels = next(svhn_test_iter)
-        svhn, s_labels = self.to_var(svhn), self.to_var(s_labels).long().squeeze()
-        mnist, m_labels = next(mnist_test_iter)
-        mnist, m_labels = self.to_var(mnist), self.to_var(m_labels)
+        self.normalize_distances = not self.config.unnormalized_distances
 
+        if (self.use_self_distance or self.use_distance_loss) and self.normalize_distances:
+            self.set_expectation_and_std()
+
+        
+        self.g12.eval()
         self.g21.eval()
+        self.d1.eval()
+        self.d2.eval()
+
+        total_d_real_loss, total_d_mnist_loss, total_d_svhn_loss, total_d_fake_loss, total_gen_loss_A, total_gen_loss_B = 0,0,0,0,0,0
+
 
         with torch.no_grad():
-            for data in mnist_test_loader:
-                images,labels = data
+            for step in range(math.floor(10000/16)):
 
-                print(f"images size: {images.shape}")
+                # load svhn and mnist dataset
+                svhn, s_labels = next(svhn_test_iter)
+                svhn, s_labels = self.to_var(svhn), self.to_var(s_labels).long().squeeze()
+                mnist, m_labels = next(mnist_test_iter)
+                mnist, m_labels = self.to_var(mnist), self.to_var(m_labels)
 
-                gen_image = self.g12(images)
 
-                print(f"gen_images size: {gen_image.shape}")
+                #============ test D ============#
+                out = self.d1(mnist)
+                d1_loss = torch.mean((out-1)**2)
+                
+                out = self.d2(svhn)
+                d2_loss = torch.mean((out-1)**2)
+                
+                d_mnist_loss = d1_loss
+                d_svhn_loss = d2_loss
+                d_real_loss = d1_loss + d2_loss
+
+                # test with fake images
+                fake_svhn = self.g12(mnist)
+                out = self.d2(fake_svhn)
+                d2_loss = torch.mean(out**2)
+                
+                fake_mnist = self.g21(svhn)
+                out = self.d1(fake_mnist)
+                d1_loss = torch.mean(out**2)
+                
+                d_fake_loss = d1_loss + d2_loss
+
+
+                #============ test G ============#
+                fake_svhn = self.g12(mnist)
+                out_svhn = self.d2(fake_svhn)
+                reconst_mnist = self.g21(fake_svhn)
+
+                gen_loss_A = torch.mean((out_svhn-1)**2)
+                g_loss = gen_loss_A
+
+                if self.use_reconst_loss:
+                    reconst_loss_A = torch.mean((mnist - reconst_mnist) ** 2)
+                    g_loss += reconst_loss_A
+
+                if self.use_distance_loss:
+                    dist_A = self.get_distance_losses(mnist, fake_svhn, A_to_AB=True) * self.lambda_distance_A
+                    g_loss += dist_A
+                elif self.use_self_distance:
+                    dist_A = self.get_self_distances(mnist, fake_svhn, A_to_AB=True) * self.lambda_distance_A
+                    g_loss += dist_A
+
+                fake_mnist  = self.g21(svhn)
+                out_mnist = self.d1(fake_mnist)
+                reconst_svhn = self.g12(fake_mnist)
+
+                gen_loss_B = torch.mean((out_mnist - 1) ** 2)
+                g_loss = gen_loss_B
+
+                if self.use_reconst_loss:
+                    reconst_loss_B = torch.mean((svhn - reconst_svhn) ** 2)
+                    g_loss += reconst_loss_B
+
+                if self.use_distance_loss:
+                    dist_B = self.get_distance_losses(svhn, fake_mnist, A_to_AB=False) * self.lambda_distance_B
+                    g_loss += dist_B
+                elif self.use_self_distance:
+                    dist_B = self.get_self_distances(svhn, fake_mnist, A_to_AB=False) * self.lambda_distance_B
+                    g_loss += dist_B
+
+                total_d_real_loss += d_fake_loss.item()/625
+                total_d_fake_loss += d_fake_loss.item()/625
+
+                total_d_mnist_loss += d_mnist_loss.item()/625
+                total_d_svhn_loss += d_svhn_loss.item()/625
+
+                total_gen_loss_A += gen_loss_A.item()/625
+                total_gen_loss_B += gen_loss_A.item()/625
+                
+                # print the log info
+                if (step+1) % self.log_step == 0:
+
+                    print('Step [%d/%d], d_real_loss: %.4f, d_mnist_loss: %.4f, d_svhn_loss: %.4f, '
+                        'd_fake_loss: %.4f, gen_loss_A: %.4f, gen_loss_B: %.4f,'
+                        %(step+1, self.train_iters, d_real_loss.data.item(), d_mnist_loss.data.item(),
+                            d_svhn_loss.data.item(), d_fake_loss.data.item(), gen_loss_A.data.item(),gen_loss_B.data.item()))
+
+                if self.use_reconst_loss:
+                    print ('reconst_loss_A: %.4f, recons_loss_B: %.4f, ' %
+                            (reconst_loss_A.data.item(), reconst_loss_B.data.item()))
+                if self.use_distance_loss or self.use_self_distance:
+                    print  ('dist_loss_A: %.4f, dist_loss_B: %.4f, ' %
+                            (dist_A.data.item(), dist_B.data.item()))
+                    
+                
+            print("Total Losses:")
+            print(f"total_d_real_loss:{total_d_real_loss}")
+            print(f"total_d_fake_loss:{total_d_fake_loss}")
+
+            print(f"total_d_mnist_loss:{total_d_mnist_loss}")
+            print(f"total_d_svhn_loss:{total_d_svhn_loss}")
+
+            print(f"total_gen_loss_A:{total_gen_loss_A}")
+            print(f"total_gen_loss_B:{total_gen_loss_B}")
+
+           
+
 
 
 
