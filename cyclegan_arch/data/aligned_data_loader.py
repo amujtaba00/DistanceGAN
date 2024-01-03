@@ -50,7 +50,7 @@ class AlignedDataLoader(BaseDataLoader):
 
         transformations = [
             # TODO: Scale
-            transforms.Scale(opt.loadSize),
+            transforms.Resize(opt.loadSize),
             transforms.ToTensor(),
             transforms.Normalize((0.5, 0.5, 0.5),
                                  (0.5, 0.5, 0.5))]

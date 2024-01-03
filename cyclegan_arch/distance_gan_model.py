@@ -73,8 +73,8 @@ class DistanceGANModel(CycleGANModel):
         num_pairs = 0
         min_length = min(len(As), len(Bs))
 
-        for i in xrange(min_length - 1):
-            for j in xrange(i + 1, min_length):
+        for i in range(min_length - 1):
+            for j in range(i + 1, min_length):
                 num_pairs += 1
                 loss_distance_A_ij, loss_distance_B_ij = \
                     self.get_individual_distance_loss(As[i], As[j],
@@ -97,14 +97,14 @@ class DistanceGANModel(CycleGANModel):
 
         # If self distance computed std for top and bottom half
         if self.use_self_distance:
-            for i in xrange(num_items):
+            for i in range(num_items):
                 var_half_1, var_half_2 = torch.chunk(vars[i], 2, dim=2)
                 std_sum += np.square(self.as_np(self.distance(var_half_1, var_half_2)) - expectation)
             return np.sqrt(std_sum / num_items)
 
         # Otherwise compute std for all pairs of images
-        for i in xrange(num_items - 1):
-            for j in xrange(i + 1, num_items):
+        for i in range(num_items - 1):
+            for j in range(i + 1, num_items):
                 num_pairs += 1
                 std_sum += np.square(self.as_np(self.distance(vars[i], vars[j])) - expectation)
 
@@ -117,15 +117,15 @@ class DistanceGANModel(CycleGANModel):
 
         # If self distance computed expectation for top and bottom half
         if self.use_self_distance:
-            for i in xrange(num_items):
+            for i in range(num_items):
                 # Split image to top and bottom half
                 var_half_1, var_half_2 = torch.chunk(vars[i], 2, dim=2)
                 distance_sum += self.as_np(self.distance(var_half_1, var_half_2))
             return distance_sum / num_items
 
         # Otherwise compute expectation for all pairs of images
-        for i in xrange(num_items - 1):
-            for j in xrange(i + 1, num_items):
+        for i in range(num_items - 1):
+            for j in range(i + 1, num_items):
                 num_pairs += 1
                 distance_sum += self.as_np(self.distance(vars[i], vars[j]))
 
