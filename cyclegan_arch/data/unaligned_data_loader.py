@@ -58,7 +58,7 @@ class PairedData(object):
 class UnalignedDataLoader(BaseDataLoader):
     def initialize(self, opt):
         BaseDataLoader.initialize(self, opt)
-        transformations = [transforms.Scale(opt.loadSize),
+        transformations = [transforms.Resize(opt.loadSize),
                            transforms.RandomCrop(opt.fineSize),
                            transforms.ToTensor(),
                            transforms.Normalize((0.5, 0.5, 0.5),

@@ -20,8 +20,11 @@ def main(config):
     if not os.path.exists(config.sample_path):
         os.makedirs(config.sample_path)
     
+ 
     if config.mode == 'train':
         solver.train(svhn_test_loader, mnist_test_loader)
+    elif config.mode == 'test':
+        solver.test(svhn_test_loader,mnist_test_loader)
     elif config.mode == 'sample':
         solver.sample()
 

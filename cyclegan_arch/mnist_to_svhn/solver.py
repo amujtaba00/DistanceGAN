@@ -1,3 +1,4 @@
+from matplotlib import pyplot as plt
 import torch
 import torch.nn as nn
 import torchvision
@@ -6,11 +7,14 @@ import pickle
 import scipy.io
 import numpy as np
 import torch.nn.functional as F
-
+import imageio
 from torch.autograd import Variable
 from torch import optim
 from model import G12, G21
 from model import D1, D2
+from PIL import Image
+import math
+
 
 class Solver(object):
     def __init__(self, config, svhn_loader, mnist_loader):
@@ -127,8 +131,8 @@ class Solver(object):
         num_pairs = 0
         min_length = len(As)
 
-        for i in xrange(min_length - 1):
-            for j in xrange(i + 1, min_length):
+        for i in range(min_length - 1):
+            for j in range(i + 1, min_length):
                 num_pairs += 1
                 loss_distance_A_ij = \
                     self.get_individual_distance_loss(As[i], As[j],
@@ -145,14 +149,14 @@ class Solver(object):
 
         # If self distance computed std for top and bottom half
         if self.use_self_distance:
-            for i in xrange(num_items):
+            for i in range(num_items):
                 var_half_1, var_half_2 = torch.chunk(vars[i], 2, dim=2)
                 std_sum += np.square(self.as_np(self.distance(var_half_1, var_half_2)) - expectation)
             return np.sqrt(std_sum / num_items)
 
         # Otherwise compute std for all pairs of images
-        for i in xrange(num_items - 1):
-            for j in xrange(i + 1, num_items):
+        for i in range(num_items - 1):
+            for j in range(i + 1, num_items):
                 num_pairs += 1
                 std_sum += np.square(self.as_np(self.distance(vars[i], vars[j])) - expectation)
 
@@ -165,15 +169,15 @@ class Solver(object):
 
         # If self distance computed expectation for top and bottom half
         if self.use_self_distance:
-            for i in xrange(num_items):
+            for i in range(num_items):
                 # Split image to top and bottom half
                 var_half_1, var_half_2 = torch.chunk(vars[i], 2, dim=2)
                 distance_sum += self.as_np(self.distance(var_half_1, var_half_2))
             return distance_sum / num_items
 
         # Otherwise compute expectation for all pairs of images
-        for i in xrange(num_items - 1):
-            for j in xrange(i + 1, num_items):
+        for i in range(num_items - 1):
+            for j in range(i + 1, num_items):
                 num_pairs += 1
                 distance_sum += self.as_np(self.distance(vars[i], vars[j]))
 
@@ -194,7 +198,7 @@ class Solver(object):
             if step >= max_items:
                 break
 
-            mnist, m_labels = mnist_iter.next()
+            mnist, m_labels = next(mnist_iter)
             A = Variable(mnist, volatile=True)
 
             if A.size()[0] != self.config.batch_size:
@@ -209,7 +213,7 @@ class Solver(object):
             if step >= max_items:
                 break
 
-            svhn, s_labels = svhn_iter.next()
+            svhn, s_labels = next(svhn_iter)
             B = Variable(svhn, volatile=True)
 
             if B.size()[0] != self.config.batch_size:
@@ -218,10 +222,10 @@ class Solver(object):
             B_vars.append(B)
             num_vars_B +=1
 
-        self.expectation_A = self.get_expectation(num_vars_A, A_vars)[0].astype(float)
-        self.expectation_B = self.get_expectation(num_vars_B, B_vars)[0].astype(float)
-        self.std_A = self.get_std(num_vars_A, A_vars, self.expectation_A)[0].astype(float)
-        self.std_B = self.get_std(num_vars_B, B_vars, self.expectation_B)[0].astype(float)
+        self.expectation_A = self.get_expectation(num_vars_A, A_vars).astype(float)
+        self.expectation_B = self.get_expectation(num_vars_B, B_vars).astype(float)
+        self.std_A = self.get_std(num_vars_A, A_vars, self.expectation_A).astype(float)
+        self.std_B = self.get_std(num_vars_B, B_vars, self.expectation_B).astype(float)
 
         print('Expectation for dataset A: %f' % self.expectation_A)
         print('Expectation for dataset B: %f' % self.expectation_B)
@@ -231,6 +235,160 @@ class Solver(object):
 
     def as_np(self, data):
         return data.cpu().data.numpy()
+    
+    def test(self,svhn_test_loader,mnist_test_loader):
+        svhn_test_iter = iter(svhn_test_loader)
+        mnist_test_iter = iter(mnist_test_loader)
+
+        self.g12 = G12(self.config, conv_dim=self.g_conv_dim)
+        self.g21 = G21(self.config, conv_dim=self.g_conv_dim)
+        self.d1 = D1(conv_dim=self.d_conv_dim)
+        self.d2 = D2(conv_dim=self.d_conv_dim)
+
+        g12_path = os.path.join(self.model_path, 'g12-30000.pkl')
+        g21_path = os.path.join(self.model_path, 'g21-30000.pkl')
+        d1_path = os.path.join(self.model_path, 'd1-30000.pkl')
+        d2_path = os.path.join(self.model_path, 'd2-30000.pkl')
+
+        self.g12.load_state_dict(torch.load(g12_path))
+        self.g21.load_state_dict(torch.load(g21_path))
+        self.d1.load_state_dict(torch.load(d1_path))
+        self.d2.load_state_dict(torch.load(d2_path))
+
+        self.normalize_distances = not self.config.unnormalized_distances
+
+        if (self.use_self_distance or self.use_distance_loss) and self.normalize_distances:
+            self.set_expectation_and_std()
+
+        
+        self.g12.eval()
+        self.g21.eval()
+        self.d1.eval()
+        self.d2.eval()
+
+        total_d_real_loss, total_d_mnist_loss, total_d_svhn_loss, total_d_fake_loss, total_gen_loss_A, total_gen_loss_B = 0,0,0,0,0,0
+
+
+        with torch.no_grad():
+            for step in range(math.floor(10000/16)):
+
+                # load svhn and mnist dataset
+                svhn, s_labels = next(svhn_test_iter)
+                svhn, s_labels = self.to_var(svhn), self.to_var(s_labels).long().squeeze()
+                mnist, m_labels = next(mnist_test_iter)
+                mnist, m_labels = self.to_var(mnist), self.to_var(m_labels)
+
+
+                #============ test D ============#
+                out = self.d1(mnist)
+                d1_loss = torch.mean((out-1)**2)
+                
+                out = self.d2(svhn)
+                d2_loss = torch.mean((out-1)**2)
+                
+                d_mnist_loss = d1_loss
+                d_svhn_loss = d2_loss
+                d_real_loss = d1_loss + d2_loss
+
+                # test with fake images
+                fake_svhn = self.g12(mnist)
+                out = self.d2(fake_svhn)
+                d2_loss = torch.mean(out**2)
+                
+                fake_mnist = self.g21(svhn)
+                out = self.d1(fake_mnist)
+                d1_loss = torch.mean(out**2)
+                
+                d_fake_loss = d1_loss + d2_loss
+
+
+                #============ test G ============#
+                fake_svhn = self.g12(mnist)
+                out_svhn = self.d2(fake_svhn)
+                reconst_mnist = self.g21(fake_svhn)
+
+                gen_loss_A = torch.mean((out_svhn-1)**2)
+                g_loss = gen_loss_A
+
+                if self.use_reconst_loss:
+                    reconst_loss_A = torch.mean((mnist - reconst_mnist) ** 2)
+                    g_loss += reconst_loss_A
+
+                if self.use_distance_loss:
+                    dist_A = self.get_distance_losses(mnist, fake_svhn, A_to_AB=True) * self.lambda_distance_A
+                    g_loss += dist_A
+                elif self.use_self_distance:
+                    dist_A = self.get_self_distances(mnist, fake_svhn, A_to_AB=True) * self.lambda_distance_A
+                    g_loss += dist_A
+
+                fake_mnist  = self.g21(svhn)
+                out_mnist = self.d1(fake_mnist)
+                reconst_svhn = self.g12(fake_mnist)
+
+                gen_loss_B = torch.mean((out_mnist - 1) ** 2)
+                g_loss = gen_loss_B
+
+                if self.use_reconst_loss:
+                    reconst_loss_B = torch.mean((svhn - reconst_svhn) ** 2)
+                    g_loss += reconst_loss_B
+
+                if self.use_distance_loss:
+                    dist_B = self.get_distance_losses(svhn, fake_mnist, A_to_AB=False) * self.lambda_distance_B
+                    g_loss += dist_B
+                elif self.use_self_distance:
+                    dist_B = self.get_self_distances(svhn, fake_mnist, A_to_AB=False) * self.lambda_distance_B
+                    g_loss += dist_B
+
+                total_d_real_loss += d_fake_loss.item()/625
+                total_d_fake_loss += d_fake_loss.item()/625
+
+                total_d_mnist_loss += d_mnist_loss.item()/625
+                total_d_svhn_loss += d_svhn_loss.item()/625
+
+                total_gen_loss_A += gen_loss_A.item()/625
+                total_gen_loss_B += gen_loss_A.item()/625
+                
+                # print the log info
+                if (step+1) % self.log_step == 0:
+
+                    print('Step [%d/%d], d_real_loss: %.4f, d_mnist_loss: %.4f, d_svhn_loss: %.4f, '
+                        'd_fake_loss: %.4f, gen_loss_A: %.4f, gen_loss_B: %.4f,'
+                        %(step+1, self.train_iters, d_real_loss.data.item(), d_mnist_loss.data.item(),
+                            d_svhn_loss.data.item(), d_fake_loss.data.item(), gen_loss_A.data.item(),gen_loss_B.data.item()))
+
+                if self.use_reconst_loss:
+                    print ('reconst_loss_A: %.4f, recons_loss_B: %.4f, ' %
+                            (reconst_loss_A.data.item(), reconst_loss_B.data.item()))
+                if self.use_distance_loss or self.use_self_distance:
+                    print  ('dist_loss_A: %.4f, dist_loss_B: %.4f, ' %
+                            (dist_A.data.item(), dist_B.data.item()))
+                    
+                
+            print("Total Losses:")
+            print(f"total_d_real_loss:{total_d_real_loss}")
+            print(f"total_d_fake_loss:{total_d_fake_loss}")
+
+            print(f"total_d_mnist_loss:{total_d_mnist_loss}")
+            print(f"total_d_svhn_loss:{total_d_svhn_loss}")
+
+            print(f"total_gen_loss_A:{total_gen_loss_A}")
+            print(f"total_gen_loss_B:{total_gen_loss_B}")
+
+           
+
+
+
+
+
+
+
+
+
+
+        
+
+
+
 
     def train(self, svhn_test_loader, mnist_test_loader):
         svhn_iter = iter(self.svhn_loader)
@@ -240,8 +398,8 @@ class Solver(object):
         # fixed mnist and svhn for sampling
         svhn_test_iter = iter(svhn_test_loader)
         mnist_test_iter = iter(mnist_test_loader)
-        fixed_svhn = self.to_var(svhn_test_iter.next()[0])
-        fixed_mnist = self.to_var(mnist_test_iter.next()[0])
+        fixed_svhn = self.to_var(next(svhn_test_iter)[0])
+        fixed_mnist = self.to_var(next(mnist_test_iter)[0])
 
         self.normalize_distances = not self.config.unnormalized_distances
 
@@ -255,9 +413,9 @@ class Solver(object):
                 svhn_iter = iter(self.svhn_loader)
             
             # load svhn and mnist dataset
-            svhn, s_labels = svhn_iter.next() 
+            svhn, s_labels = next(svhn_iter)
             svhn, s_labels = self.to_var(svhn), self.to_var(s_labels).long().squeeze()
-            mnist, m_labels = mnist_iter.next() 
+            mnist, m_labels = next(mnist_iter)
             mnist, m_labels = self.to_var(mnist), self.to_var(m_labels)
             
             #============ train D ============#
@@ -343,15 +501,15 @@ class Solver(object):
 
                 print('Step [%d/%d], d_real_loss: %.4f, d_mnist_loss: %.4f, d_svhn_loss: %.4f, '
                       'd_fake_loss: %.4f, gen_loss_A: %.4f, gen_loss_B: %.4f,'
-                      %(step+1, self.train_iters, d_real_loss.data[0], d_mnist_loss.data[0],
-                        d_svhn_loss.data[0], d_fake_loss.data[0], gen_loss_A.data[0],gen_loss_B.data[0]))
+                      %(step+1, self.train_iters, d_real_loss.data.item(), d_mnist_loss.data.item(),
+                        d_svhn_loss.data.item(), d_fake_loss.data.item(), gen_loss_A.data.item(),gen_loss_B.data.item()))
 
                 if self.use_reconst_loss:
                     print ('reconst_loss_A: %.4f, recons_loss_B: %.4f, ' %
-                           (reconst_loss_A.data[0], reconst_loss_B.data[0]))
+                           (reconst_loss_A.data.item(), reconst_loss_B.data.item()))
                 if self.use_distance_loss or self.use_self_distance:
                     print  ('dist_loss_A: %.4f, dist_loss_B: %.4f, ' %
-                            (dist_A.data[0], dist_B.data[0]))
+                            (dist_A.data.item(), dist_B.data.item()))
 
 
             # save the sampled images
@@ -363,16 +521,19 @@ class Solver(object):
                 svhn , fake_svhn = self.to_data(fixed_svhn), self.to_data(fake_svhn)
                 
                 merged = self.merge_images(mnist, fake_svhn)
-                path = os.path.join(self.sample_path, 'sample-%d-m-s.png' %(step+1))
-                scipy.misc.imsave(path, merged)
+                path = os.path.join(self.sample_path+"/mtos", 'sample-%d-m-s.png' %(step+1))
+                im = Image.fromarray((merged * 255).astype(np.uint8))
+
+                imageio.imwrite(path, im)
                 print ('saved %s' %path)
                 
                 merged = self.merge_images(svhn, fake_mnist)
-                path = os.path.join(self.sample_path, 'sample-%d-s-m.png' %(step+1))
-                scipy.misc.imsave(path, merged)
+                path = os.path.join(self.sample_path+"/stom", 'sample-%d-s-m.png' %(step+1))
+                im = Image.fromarray((merged * 255).astype(np.uint8))
+                imageio.imwrite(path, im)
                 print ('saved %s' %path)
             
-            if (step+1) % 5000 == 0:
+            if (step+1) % 1000 == 0:
                 # save the model parameters for each epoch
                 g12_path = os.path.join(self.model_path, 'g12-%d.pkl' %(step+1))
                 g21_path = os.path.join(self.model_path, 'g21-%d.pkl' %(step+1))
